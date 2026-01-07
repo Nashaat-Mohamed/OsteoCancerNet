@@ -1,0 +1,221 @@
+#===================================================================================
+"""
+OsteoCancerNet – Full Reproducible Python Code
+"""
+#====================================================================================
+"""
+Author: Nashaat M. Hussein
+Date: 2026-01-07
+Project: OsteoCancerNet - Bone X-ray Classification (Binary)
+Description: Complete pipeline for Bone X-ray classification with:
+             - Advanced preprocessing (CLAHE + Unsharp Mask)
+             - Data Augmentation
+             - Feature extraction (EfficientNet-B4)
+             - SVM classification
+             - Grad-CAM visualization
+             - Full metrics (Accuracy, Precision, Recall, F1, ROC, Confusion Matrix)
+"""
+#====================================================================================
+# ==============================
+# 1. Import Required Libraries
+# ==============================
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.applications import EfficientNetB4
+from tensorflow.keras.applications.efficientnet import preprocess_input
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc
+
+# ==============================
+# 2. Parameters and Paths
+# ==============================
+IMG_SIZE = 380
+BATCH_SIZE = 16
+NUM_CLASSES = 2
+CATEGORIES = ["Normal", "BoneCancer"]
+
+TRAIN_DIR = "dataset/train"
+VAL_DIR   = "dataset/val"
+TEST_DIR  = "dataset/test"
+
+SVM_KERNEL = 'rbf'
+SVM_C = 10
+SVM_GAMMA = 0.01
+
+# ==============================
+# 3. Preprocessing Functions
+# ==============================
+def preprocess_image(image_path):
+    """
+    Load image, apply CLAHE + Unsharp Masking, and return RGB image.
+    """
+    img = cv2.imread(image_path)
+    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    cl1 = clahe.apply(gray)
+
+    # Unsharp Masking
+    gaussian = cv2.GaussianBlur(cl1, (9,9), 10.0)
+    unsharp = cv2.addWeighted(cl1, 1.5, gaussian, -0.5, 0)
+
+    # Convert to RGB
+    final_img = cv2.merge([unsharp, unsharp, unsharp])
+    return final_img
+
+def load_dataset(directory):
+    images, labels = [], []
+    for label, category in enumerate(CATEGORIES):
+        folder = os.path.join(directory, category)
+        for file in os.listdir(folder):
+            img_path = os.path.join(folder, file)
+            img = preprocess_image(img_path)
+            images.append(img)
+            labels.append(label)
+    return np.array(images), np.array(labels)
+
+# ==============================
+# 4. Load Data
+# ==============================
+print("Loading datasets...")
+X_train, y_train = load_dataset(TRAIN_DIR)
+X_val, y_val     = load_dataset(VAL_DIR)
+X_test, y_test   = load_dataset(TEST_DIR)
+
+# Normalize images
+X_train = X_train / 255.0
+X_val   = X_val / 255.0
+X_test  = X_test / 255.0
+
+# ==============================
+# 5. Data Augmentation
+# ==============================
+train_datagen = ImageDataGenerator(
+    rotation_range=90,
+    horizontal_flip=True,
+    brightness_range=[0.8, 1.2]
+)
+train_generator = train_datagen.flow(X_train, y_train, batch_size=BATCH_SIZE, shuffle=True)
+
+# ==============================
+# 6. EfficientNet-B4 Feature Extraction
+# ==============================
+base_model = EfficientNetB4(weights="imagenet", include_top=False, pooling="avg",
+                             input_shape=(IMG_SIZE, IMG_SIZE, 3))
+
+def extract_features(model, images):
+    images = preprocess_input(images * 255.0)
+    features = model.predict(images, batch_size=BATCH_SIZE, verbose=1)
+    return features
+
+print("Extracting features...")
+X_train_features = extract_features(base_model, X_train)
+X_val_features   = extract_features(base_model, X_val)
+X_test_features  = extract_features(base_model, X_test)
+
+# Standardize features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_features)
+X_val_scaled   = scaler.transform(X_val_features)
+X_test_scaled  = scaler.transform(X_test_features)
+
+# ==============================
+# 7. SVM Classifier
+# ==============================
+svm_classifier = SVC(kernel=SVM_KERNEL, C=SVM_C, gamma=SVM_GAMMA, probability=True)
+svm_classifier.fit(X_train_scaled, y_train)
+
+# ==============================
+# 8. Predictions
+# ==============================
+y_train_pred = svm_classifier.predict(X_train_scaled)
+y_val_pred   = svm_classifier.predict(X_val_scaled)
+y_test_pred  = svm_classifier.predict(X_test_scaled)
+y_test_prob  = svm_classifier.predict_proba(X_test_scaled)[:, 1]
+
+# ==============================
+# 9. Evaluation Metrics
+# ==============================
+def evaluate_model(y_true, y_pred, dataset_name):
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred)
+    rec = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    print(f"\n{dataset_name} Results:")
+    print(f"Accuracy  : {acc:.4f}")
+    print(f"Precision : {prec:.4f}")
+    print(f"Recall    : {rec:.4f}")
+    print(f"F1-score  : {f1:.4f}")
+
+evaluate_model(y_train, y_train_pred, "Training")
+evaluate_model(y_val, y_val_pred, "Validation")
+evaluate_model(y_test, y_test_pred, "Test")
+
+# Confusion Matrix
+cm = confusion_matrix(y_test, y_test_pred)
+plt.figure(figsize=(6,5))
+plt.imshow(cm, cmap="Blues")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.colorbar()
+for i in range(NUM_CLASSES):
+    for j in range(NUM_CLASSES):
+        plt.text(j, i, cm[i,j], ha="center", va="center")
+plt.show()
+
+# ROC Curve
+fpr, tpr, _ = roc_curve(y_test, y_test_prob)
+roc_auc = auc(fpr, tpr)
+plt.figure(figsize=(6,5))
+plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+plt.plot([0,1],[0,1], linestyle="--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve - OsteoCancerNet")
+plt.legend()
+plt.show()
+
+# ==============================
+# 10. Grad-CAM Visualization
+# ==============================
+def generate_gradcam(model, img_array, layer_name="top_conv"):
+    grad_model = tf.keras.models.Model(
+        [model.inputs], [model.get_layer(layer_name).output, model.output]
+    )
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_array)
+        class_idx = tf.argmax(predictions[0])
+        loss = predictions[:, class_idx]
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = np.maximum(heatmap,0)/np.max(heatmap)
+    return heatmap.numpy()
+
+def overlay_heatmap(img, heatmap, alpha=0.4, colormap=cv2.COLORMAP_JET):
+    heatmap = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
+    heatmap = cv2.applyColorMap(np.uint8(255*heatmap), colormap)
+    overlay = cv2.addWeighted(img, 1-alpha, heatmap, alpha, 0)
+    return overlay
+
+# Example Grad-CAM on first test image
+img = X_test[0][np.newaxis, ...]
+heatmap = generate_gradcam(base_model, img)
+overlay_img = overlay_heatmap((X_test[0]*255).astype(np.uint8), heatmap)
+
+plt.figure(figsize=(6,6))
+plt.imshow(overlay_img)
+plt.title(f"Grad-CAM Overlay - True: {y_test[0]} Predicted: {y_test_pred[0]}")
+plt.axis("off")
+plt.show()
+
